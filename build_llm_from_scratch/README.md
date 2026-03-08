@@ -95,8 +95,9 @@ Transformer 之前，长序列建模中，循环神经网络(recurrent neural ne
 2. 再重新归一化注意力权重，使得每行的总和为 1（ $x_i = x_i / sum(x)$）；
 3. （1）和（2）等价于对未缩放的注意力分数，将对角线以上部分用 $-\infin$ 填充（$e^{-\infin}=0$），再进行 softmax 归一化；
 
-Dropout 掩码额外的注意力权重，减少过拟合： dropout 仅在训练期间使用，训练结束后会被取消；
-- Transformer 中通常有两处应用：一是计算注意力权重之后，而是将这些权重应用于值向量之后。
+Dropout 掩码额外的注意力权重，减少过拟合： dropout 仅在训练期间使用，训练结束后会被取消（即推理时不采用)；
+- Transformer 中通常有两处应用：一是计算注意力权重之后，二是将这些权重应用于值向量之后。
+- 训练时：为了补偿减少的活跃函数，矩阵中剩余元素会按比例进行放大（如Dropout为50%，则放大比例为2）；
 
 多头注意力：“多头”是将注意力机制分成多个“头”，每个“头”独立工作。因果注意力扩展到多头注意力：
 - 直接堆叠多个 CausalAttention 模块（层），每个实例都有独立的参数，最终得到多个上下文向量，进行拼接成一个更长的上下文向量；
@@ -105,3 +106,79 @@ Dropout 掩码额外的注意力权重，减少过拟合： dropout 仅在训练
 > 最小的 GPT-2 模型（参数量为 1.17 亿）有 12 个注意力头，上下文嵌入向量维度为 768。
 > 最大的 GPT-2 模型（参数量为 15 亿）有 25 个注意力头，上下文嵌入向量维度为 1600。
 
+
+## 4. 从头实现 GPT 模型进行文本生成
+
+使用归一化层，提高神经网络训练的稳定性和效率。
+- 层归一化：调整神经网络的激活（输出）《使其均值为 0 且方差为 1。通常在多头注意力模块的前后进行。
+
+GELU(Guassian Error Linear Unit) 结合高斯分布，与简单的 ReLU 相比，能够提升深度学习模型的性能。近似计算公式如下：
+- 是个平滑的非线性函数，而 ReLU 是分阶段线性函数。                                                            
+
+$GELU(x)=0.5 * x * (1 + tanh(\sqrt{\frac{2}{\pi}} * (x + 0.044715 * x^3)))$
+
+前馈神经网络模块由线性层（维度扩大）+GELU层+线性层（维度缩小）组成：允许模型探索更丰富的表示空间。
+- 输入维度和输出维度一致，后续堆叠多个层时无需调整维度，增强模型的扩展能力；
+
+快捷连接：也称跳跃连接或残差连接，通过跳过一个或多个层，为梯度在网络中的流动提供一个可替代且更短的路径。
+- 解决梯度消失问题：训练过程中，梯度在反向传播时逐渐变小，导致早期网络难以有效训练。
+
+Transformer 块的核心思想是，自注意力机制在多头注意力块中用于识别和分析输入序列中元素之间的关系。
+前馈神经网络则在每个位置上对数据进行单独的修改。
+- 层归一化应用于上述两个组件前，而dropout 应用于上述两个组件后，对模型进行正则化并防止过拟合；
+- 较早的架构在自注意力和前馈神经网络之后才应用层归一化，通常会导致较差的训练效果。
+
+```mermaid
+graph BT
+    %% 输入
+    Input --> LN1[Layer Normalization]
+    LN1 --> MHA[Multi-Head Attention<br/>（多头自注意力）]
+    MHA --> DR1[dropout] --> R1((+))
+    
+    Input --残差连接--> R1
+    R1 --> LN2[Layer Normalization]
+    
+    %% 前馈网络层
+    LN2 --> FFN[Feed Forward Network<br/>（全连接+ReLU+全连接）]
+    FFN --> DR2[dropout] --> A3((+))
+    R1 --残差连接--> A3
+    
+    %% 输出
+    A3 --> Output
+```
+
+GPT 模型的结构
+
+```mermaid
+graph BT
+    classDef empty fill:transparent,stroke:transparent,shape:circle,font-size:0px 
+    %% 输入
+    Text["Every effort moves you"]  --> Token[词元化文本]
+    Token --> Token_Embed[词元嵌入层]
+
+    subgraph "GPT模型"
+    direction BT
+
+    Token_Embed --> Pos_Embed[位置嵌入层]
+    Pos_Embed --> DR0[dropout] 
+
+    DR0 --> LN1[Layer Normalization]
+    DR0 --残差连接--> R1
+
+      subgraph "Transformer Block * 12"
+      LN1 --> MHA[Multi-Head Attention<br/>（多头自注意力）]
+      MHA --> DR1[dropout] --> R1((+))
+      
+      R1 --> LN2[Layer Normalization]
+      
+      %% 前馈网络层
+      LN2 --> FFN[Feed Forward Network<br/>（全连接+ReLU+全连接）]
+      FFN --> DR2[dropout] --> A3((+))
+      R1 --残差连接--> A3
+      end
+
+    %% 输出
+    A3 --> O_L[最终层归一化] --> 线性输出层
+    end
+    线性输出层 --> S:::empty
+```
